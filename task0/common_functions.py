@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
+# In[2]:
 
 
 import pandas as pd
@@ -39,6 +39,8 @@ class DataPreprocesser:
         df['hour'] = df.index.hour
         df['sp'] = df.hour*2 +df.index.minute/30 + 1
         self.df = df
+    def set_df(self,df):
+        self.df = df
     def remove_nan(self):
         self.df = self.df.dropna(subset = ['demand_MW']).interpolate()
     def interpolate_df(self):
@@ -50,12 +52,16 @@ class DataPreprocesser:
         X = self.df[X_column_names].to_numpy()
         y = self.df[y_column_names].to_numpy()[:,0]
         return X, y
-    def get_columns_of_group_names(self,group_names, location_numbers):
+    def get_columns_of_group_names(self,group_names, location_numbers, df=None):
         columns_names = []
         for name in group_names:
             for i in location_numbers:
                 column_name = '{}_location{}'.format(name, i)
-                if column_name in self.df.columns.to_list():
+                if df is None:
+                    this_df = self.df
+                else:
+                    this_df = df
+                if column_name in this_df.columns.to_list():
                     columns_names.append(column_name)
                 else:
                     print('{} is not in df columns'.format(column_name))
@@ -203,7 +209,7 @@ class MachineLearningResearcher:
             self.best_score = get_best_score(scores)
         return self.best_score
     
-class DataVisualisation:
+class DataVisualiser:
     def __init__():
         return
     def display_correlation_color_map(df, columns_names):
@@ -218,5 +224,55 @@ class DataVisualisation:
         else:
             sns.pairplot(data=df[columns_names], hue=hue_name)
     
+class MLPredictor:
+    def __init__(self, data_preprocess, week_prediction):
+        self.data_preprocess = data_preprocess
+        self.week_prediction = week_prediction
+    def get_demand_previous_week(self):
+        demand_prediction = self.data_preprocess.df.loc[self.data_preprocess.df['week'] == (self.week_prediction-1), ['demand_MW', 'week', 'dow', 'hour', 'sp']]
+        demand_prediction.index = demand_prediction.index + pd.DateOffset(7)
+        demand_prediction['week']=demand_prediction.index.week
+        demand_prediction['dow']=demand_prediction.index.dayofweek
+        demand_prediction['hour'] = demand_prediction.index.hour
+        demand_prediction['sp'] = demand_prediction.hour*2 +demand_prediction.index.minute/30 + 1
+        self.predicted_df = demand_prediction
+        return self.predicted_df
+    def get_weather_prediction(self,weather_path, demand_pred=None):
+        if demand_pred == None:
+            demand_prediction = self.predicted_df
+        else:
+            demand_prediction = demand_pred
+        weather_prediction = pd.read_csv(weather_path,parse_dates=['datetime'],index_col=['datetime'])
+        demand_and_weather_prediction = pd.merge(demand_prediction,weather_prediction, how='outer', left_index=True, right_index=True)
+        demand_and_weather_prediction = demand_and_weather_prediction.dropna(subset = ['demand_MW']).interpolate()
+        self.predicted_df = demand_and_weather_prediction
+        return self.predicted_df
+    
+    
+    def predict_solar_power_from_weather(self, model, data_prep=None, pred_df=None, weather_cols=None):
+        def solar_power_prediction_function(x, model, x_solar):
+            if x_solar == 0:
+                return 0
+            else:
+                return model.predict(x)[0]
+        if data_prep is None:
+            data_preprocess = self.data_preprocess
+        else:
+            data_preprocess = data_prep
+        if pred_df == None:
+            predicted_df = self.predicted_df
+        else:
+            predicted_df = pred_df
+        if weather_cols == None:
+            weather_columns = data_preprocess.get_columns_of_group_names(['temp', 'solar'], [1,2])
+            weather_columns.append('sp')
+        else:
+            weather_columns = weather_cols
+        X,y = data_preprocess.build_input_for_ml_algo(weather_columns, ['pv_power_mw'])
+        model.fit(X,y)
+    
+        predicted_df['pv_power_mw'] = predicted_df.apply(lambda x: solar_power_prediction_function(np.array([x[weather_columns].to_numpy()]), model, x['solar_location1']), axis=1)
+        self.predicted_df = predicted_df
+        return predicted_df
         
 
