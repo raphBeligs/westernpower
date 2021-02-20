@@ -18,6 +18,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 plt.style.use('seaborn-whitegrid')
+from tqdm import tqdm
+import sys
 
 class DataPreprocesser:
     weather_path=None
@@ -71,7 +73,7 @@ class DataPreprocesser:
 class BatteryPowerDispatcher:
     def __init__(self):
         return 
-    def get_ideal_discharge_dispatch(df,week,dow):#afternoon discharge
+    def get_ideal_discharge_dispatch(df,week,dow, battery_charge=6):#afternoon discharge
     
         sl  = df.loc[(df['week']==week)&(df['dow']==dow)&(df['sp']>=32)&(df['sp']<=42),['demand_MW','pv_power_mw','hour']]
         peak_ini = sl['demand_MW'].max()
@@ -82,7 +84,7 @@ class BatteryPowerDispatcher:
         energy =discharge.sum()*0.5
         sp = len(discharge[discharge>0])
     
-        while (energy>6):
+        while (energy>battery_charge):
 
             peak_target  =  peak_target +0.01
             discharge = (sl['demand_MW']-peak_target).clip(lower=0)
@@ -90,12 +92,12 @@ class BatteryPowerDispatcher:
         
         return(discharge,peak_ini,peak_target)
     
-    def get_ideal_discharge_dispatch_in_a_week(self,df, week):
+    def get_ideal_discharge_dispatch_in_a_week(self,df, week, max_battery_charge_in_week=[6,6,6,6,6,6,6]):
         res = pd.DataFrame(columns = ['peak_ini','peak_target','energy','solar_energy','duration','week','dow'])
         dispatch_summary = pd.DataFrame(index= range(32,43))
         idx = 0
         for dow in range(0,7):
-            discharge,peak_ini,peak_target = self.get_ideal_discharge_dispatch(df,week,dow)
+            discharge,peak_ini,peak_target = self.get_ideal_discharge_dispatch(df,week,dow, max_battery_charge_in_week[dow])
             energy = discharge.sum()*0.5
             sp = len(discharge[discharge>0])
             dispatch_summary[str(week*10)+str(dow)]=discharge.values
@@ -104,45 +106,65 @@ class BatteryPowerDispatcher:
             res.loc[idx,:] = [peak_ini,peak_target,energy,solar_available,sp,week,dow]
         return (dispatch_summary, res)
     
-    def get_charge_of_battery_repartition(df, week, dow):
+    def get_charge_of_battery_repartition(df, week, dow, max_charge=6):
         solar_power  = df.loc[(df['week']==week)&(df['dow']==dow)&(df['sp']<=31),['pv_power_mw','sp']]
         max_power = 2.5
-        max_charge = 6
-        max_charge_from_solar = min(solar_power['pv_power_mw'].sum()*0.5, max_charge)
-        max_charge_from_grid = max_charge-max_charge_from_solar
-        charge_power_from_solar = pd.DataFrame(columns=['power'])
+        solar_power['pv_power_norm'] = solar_power['pv_power_mw'].apply(lambda x: min(x, max_power))
+        max_charge_from_solar = solar_power['pv_power_norm'].sum()*0.5
+        charge_from_solar = min(max_charge_from_solar, max_charge)
+        solar_power['pv_power_norm'] = solar_power['pv_power_norm']*charge_from_solar / max_charge_from_solar
+        max_charge_from_grid = max_charge-charge_from_solar
+        charge_power_from_solar = pd.DataFrame(data=solar_power['pv_power_norm'].to_list(),columns=['power'])
         charge_power_from_grid = pd.DataFrame(columns=['power'])
-        charge_from_solar = 0
         charge_from_grid = 0
         for idx in range(31):
-            power_from_solar = solar_power['pv_power_mw'].values[idx]
-            charge_power_from_solar.loc[idx,:] = min(max_power, power_from_solar, max((max_charge_from_solar - charge_from_solar)*2,0))
+            power_from_solar = solar_power['pv_power_norm'].values[idx]
             charge_power_from_grid.loc[idx,:] = min(max(max_power - power_from_solar,0), max(max_charge_from_grid - charge_from_grid,0)*2)
-            charge_from_solar = charge_power_from_solar['power'].sum()*0.5
             charge_from_grid = charge_power_from_grid['power'].sum()*0.5
         return (charge_from_solar, charge_from_grid, charge_power_from_solar, charge_power_from_grid)
     
-    def get_solar_energy_proportion_by_day_in_a_week(self,df,week):
+    def get_solar_energy_proportion_by_day_in_a_week(self,df,week, max_battery_charge_in_week=[6,6,6,6,6,6,6]):
         B = pd.DataFrame(index= range(1,32))
         p_solar = []
         for dow in range(7):
-            charge_from_solar, charge_from_grid, B_solar, B_grid = self.get_charge_of_battery_repartition(df, week, dow)
+            charge_from_solar, charge_from_grid, B_solar, B_grid = self.get_charge_of_battery_repartition(
+                df, week, dow, max_battery_charge_in_week[dow])
             B[str(week*10)+str(dow)] = B_solar.values + B_grid.values
             p_solar.append(charge_from_solar/6)
         return p_solar, B
+    def get_max_solar_energy_available(df, week, dow):
+        solar_power  = df.loc[(df['week']==week)&(df['dow']==dow)&(df['sp']<=31),['pv_power_mw','sp']]
+        return min(6,solar_power['pv_power_mw'].apply(lambda x: min(2.5, x)).sum()*0.5)
+    def get_max_solar_energy_available_in_a_week(self,df, week):
+        max_solar_energy_available = []
+        for dow in range(7):
+            max_solar_energy_available.append(self.get_max_solar_energy_available(df, week, dow))
+        return max_solar_energy_available
     def get_end_of_the_day_dispatch(week):
         B_end_of_the_day = pd.DataFrame(index= range(43,49))
         for dow in range(0,7):
             B_end_of_the_day[str(week*10)+str(dow)]=0
         return B_end_of_the_day
-    def get_all_dispatch_in_a_week(self,df, week):
-        p_solar, B_charge = self.get_solar_energy_proportion_by_day_in_a_week(self,df, week)
-        B_discharge, res = self.get_ideal_discharge_dispatch_in_a_week(self, df, week)
+    def get_all_dispatch_in_a_week(self,df, week, full_solar=False):
+        if full_solar:
+            max_battery_charge_in_week = self.get_max_solar_energy_available_in_a_week(self, df, week)
+        else:
+            max_battery_charge_in_week = [6,6,6,6,6,6,6]
+        p_solar, B_charge = self.get_solar_energy_proportion_by_day_in_a_week(self,df, week, max_battery_charge_in_week)
+        B_discharge, res = self.get_ideal_discharge_dispatch_in_a_week(self, df, week, max_battery_charge_in_week)
         B_discharge = -B_discharge
         B_end_of_the_day = self.get_end_of_the_day_dispatch(week)
         B_total = B_charge.append(B_discharge)
         B_total = B_total.append(B_end_of_the_day)
         return B_total
+    def format_dispatching_for_competition(B, index):
+        final_B = []
+        for column in B.columns.to_list():
+            final_B.append(B[column])
+        final_B = pd.concat(final_B, ignore_index=True)
+        final_B.index = index
+        final_B = pd.DataFrame(final_B, columns=['charge_MW'])
+        return final_B
     
 class MachineLearningResearcher:
     param_grids = {}
@@ -274,5 +296,59 @@ class MLPredictor:
         predicted_df['pv_power_mw'] = predicted_df.apply(lambda x: solar_power_prediction_function(np.array([x[weather_columns].to_numpy()]), model, x['solar_location1']), axis=1)
         self.predicted_df = predicted_df
         return predicted_df
+class ScoreComputer:
+    def __init__(self, B_path):
+        B = pd.read_csv(B_path, parse_dates=['datetime'],index_col=['datetime'])
+        B['week']=B.index.week
+        B['dow']=B.index.dayofweek
+        B['hour'] = B.index.hour
+        B['sp'] = B.hour*2 + B.index.minute/30 + 1
+        self.B = B
         
+    def compute_r_peak(self,demand_and_solar_power,week,dow, B_pred=None):
+        if B_pred is None:
+            B = self.B
+        else:
+            B = B_pred
+        demand_discharge = demand_and_solar_power.loc[(demand_and_solar_power['week']==week) & 
+                                          (demand_and_solar_power['dow']==dow)&(demand_and_solar_power['sp']>=32)&
+                                          (demand_and_solar_power['sp']<=42),'demand_MW']
+        B_discharge = B.loc[(B['week']==week) & (B['dow']==dow)&(B['sp']>=32) & (B['sp']<=42),'charge_MW']
+        old_peak = demand_discharge.max()
+        new_peak = (B_discharge + demand_discharge).max()
+        return 100*(old_peak-new_peak)/old_peak
+    def compute_p_solar(self,demand_and_solar_power, week, dow, B_pred=None):
+        if B_pred is None:
+            B = self.B
+        else:
+            B = B_pred
+        solar_power_for_charge = demand_and_solar_power.loc[(demand_and_solar_power['week']==week) & 
+                                              (demand_and_solar_power['dow']==dow)&(demand_and_solar_power['sp']<=31),['pv_power_mw']]
+        B_charge = B.loc[(B['week']==week) & (B['dow']==dow)&(B['sp']<=31),['charge_MW']]
+        solar_power_for_charge = solar_power_for_charge.merge(B_charge, how='outer', left_index=True, right_index=True)
+        battery_charge = B_charge['charge_MW'].sum()*0.5
+        solar_power_for_charge['charge_from_solar_MW'] = solar_power_for_charge.apply(lambda x: min(x['pv_power_mw'], x['charge_MW']), axis=1)
+        battery_charge_from_solar = solar_power_for_charge['charge_from_solar_MW'].sum()*0.5
+        p_solar = battery_charge_from_solar / battery_charge
+        p_grid = 1-p_solar
+        return p_solar, p_grid, battery_charge, solar_power_for_charge
+    def compute_scores(self, demand_and_solar_power, week, B_pred=None):
+        if B_pred is None:
+            B = self.B
+        else:
+            B = B_pred
+        scores = pd.DataFrame(columns = ['r_peak', 'p_solar', 's'])
+        idx = 0
+        with tqdm(total=7, file=sys.stdout) as pbar:
+            for dow in range(7):
+                r_peak = self.compute_r_peak(demand_and_solar_power, week, dow, B)
+                p_solar, p_grid, battery_charge, solar_power_for_charge = self.compute_p_solar(demand_and_solar_power, week, dow, B)
+                s = r_peak*(3*p_solar + p_grid)
+                scores.loc[idx, :] = [r_peak, p_solar, s]
+                idx += 1
+                pbar.update()
+        scores.index = ['dow {}'.format(i) for i in range(7)]
+        self.scores = scores
+        self.scores_mean = scores.mean()
+        return scores, scores.mean()
 
