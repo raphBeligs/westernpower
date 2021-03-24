@@ -9,3 +9,5 @@ dependencies:
   - statsmodels
   - jupyterlab
   - tqdm
+  - pip:
+      - pvlib
